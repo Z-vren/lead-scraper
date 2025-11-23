@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, AsyncIterator
 import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus, urljoin
+from apify import Actor
 
 from src.utils import normalize_url
 
@@ -112,8 +113,10 @@ async def search_yellowpages(
         
     except Exception as e:
         # Log error but continue
-        pass
+        Actor.log.error(f"Error searching YellowPages: {str(e)}")
+        Actor.log.debug(f"Search URL was: {search_url}")
     
+    Actor.log.info(f"YellowPages search found {len(companies)} companies")
     return companies
 
 
@@ -160,6 +163,7 @@ async def search_companies(
     """
     async with httpx.AsyncClient() as client:
         # Try multiple directory sources
+        Actor.log.info(f"Searching directories for: {industry} in {location}")
         sources = [
             search_yellowpages(industry, location, max_results, client),
             # Add more directory sources here as needed
@@ -169,6 +173,7 @@ async def search_companies(
         total_found = 0
         
         for source_coro in sources:
+            Actor.log.info(f"Trying search source...")
             if total_found >= max_results:
                 break
                 
@@ -188,5 +193,6 @@ async def search_companies(
                         
             except Exception as e:
                 # Continue with next source if one fails
+                Actor.log.error(f"Error in search source: {str(e)}")
                 continue
 
