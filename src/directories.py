@@ -129,7 +129,7 @@ async def search_generic_directory(
     industry: str,
     location: str,
     max_results: int,
-    client: httpx.AsyncClient
+    page: Page
 ) -> List[Dict]:
     """
     Generic directory search using a simple web search approach.
