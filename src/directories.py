@@ -46,8 +46,17 @@ async def search_yellowpages(
         # Navigate to the page with browser automation
         await page.goto(search_url, wait_until='networkidle', timeout=30000)
         
-        # Wait for listings to load
-        await page.wait_for_timeout(2000)  # Give page time to render
+        # Wait for listings to load - give more time for dynamic content
+        await page.wait_for_timeout(5000)  # Increased wait time
+        
+        # Check if page loaded correctly (look for common YellowPages elements)
+        page_title = await page.title()
+        Actor.log.info(f"Page title: {page_title}")
+        
+        # Check for CAPTCHA or error pages
+        page_content = await page.content()
+        if 'captcha' in page_content.lower() or 'robot' in page_content.lower():
+            Actor.log.warning("Possible CAPTCHA or bot detection on page")
         
         # Try multiple selectors for listings
         listings = []
@@ -56,7 +65,12 @@ async def search_yellowpages(
             'div[class*="listing"]',
             'div.srp-listing',
             'div.search-result',
-            'div[data-dotcom="result"]'
+            'div[data-dotcom="result"]',
+            'div.result',
+            'div[class*="organic"]',
+            'div[class*="business"]',
+            'article[class*="result"]',
+            'div[class*="search-listing"]'
         ]
         
         for selector in selectors:
@@ -65,11 +79,19 @@ async def search_yellowpages(
                 if listings:
                     Actor.log.info(f"Found {len(listings)} listings with selector: {selector}")
                     break
-            except:
+            except Exception as e:
+                Actor.log.debug(f"Selector {selector} failed: {str(e)}")
                 continue
         
         if not listings:
             Actor.log.warning("No listings found with any selector")
+            # Try to get a screenshot or HTML snippet for debugging
+            try:
+                # Check what's actually on the page
+                body_text = await page.evaluate('() => document.body.innerText')
+                Actor.log.debug(f"Page body text preview: {body_text[:500]}")
+            except:
+                pass
             return companies
         
         # Extract data from listings
