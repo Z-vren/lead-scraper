@@ -139,28 +139,127 @@ async def search_google_maps(
     return companies
 
 
-async def search_generic_directory(
+async def search_linkedin(
     industry: str,
     location: str,
     max_results: int,
     page: Page
 ) -> List[Dict]:
     """
-    Generic directory search using a simple web search approach.
-    This is a fallback that can be extended with other directories.
+    Search LinkedIn for companies matching industry and location.
     
     Args:
         industry: Industry keyword
         location: Location string
         max_results: Maximum number of results
-        client: HTTP client
+        page: Playwright page object
         
     Returns:
-        List of company dictionaries
+        List of company dictionaries with basic info
     """
-    # This is a placeholder for additional directory sources
-    # You can add more directory scrapers here
-    return []
+    companies = []
+    
+    try:
+        # Build search URL for LinkedIn
+        # LinkedIn search format: keywords and location
+        search_query = f"{industry} {location}"
+        search_url = f"{LINKEDIN_SEARCH_URL}/?keywords={quote_plus(industry)}"
+        
+        Actor.log.info(f"Navigating to LinkedIn: {search_url}")
+        
+        # Navigate to LinkedIn
+        await page.goto(search_url, wait_until='networkidle', timeout=30000)
+        
+        # Wait for page to load
+        await page.wait_for_timeout(5000)
+        
+        # Check if we need to log in (LinkedIn often requires authentication)
+        page_title = await page.title()
+        Actor.log.info(f"Page title: {page_title}")
+        
+        # Check if we're on a login page
+        if 'login' in page_title.lower() or 'sign in' in page_title.lower():
+            Actor.log.warning("LinkedIn requires authentication - skipping LinkedIn search")
+            return companies
+        
+        # Try to find company listings
+        listings = []
+        selectors = [
+            'div[class*="entity-result"]',
+            'div[class*="search-result"]',
+            'li[class*="reusable-search__result-container"]',
+            'div[data-chameleon-result-urn]',
+            'div[class*="company"]'
+        ]
+        
+        for selector in selectors:
+            try:
+                listings = await page.query_selector_all(selector)
+                if listings and len(listings) > 0:
+                    Actor.log.info(f"Found {len(listings)} listings with selector: {selector}")
+                    break
+            except Exception as e:
+                Actor.log.debug(f"Selector {selector} failed: {str(e)}")
+                continue
+        
+        if not listings:
+            Actor.log.warning("No LinkedIn listings found")
+            return companies
+        
+        # Extract data from listings
+        for listing in listings[:max_results]:
+            try:
+                company_data = {}
+                
+                # Extract company name
+                name_elem = await listing.query_selector('a[class*="entity-result__title"], a[class*="search-result__result-link"], h3 a, span[class*="entity-result__title-text"]')
+                if name_elem:
+                    company_data['company_name'] = await name_elem.inner_text()
+                    company_data['company_name'] = company_data['company_name'].strip()
+                    
+                    # Get LinkedIn URL
+                    linkedin_href = await name_elem.get_attribute('href')
+                    if linkedin_href:
+                        if linkedin_href.startswith('/'):
+                            company_data['linkedin_url'] = f"https://www.linkedin.com{linkedin_href}"
+                        else:
+                            company_data['linkedin_url'] = normalize_url(linkedin_href)
+                else:
+                    continue
+                
+                # Extract location/address
+                location_elem = await listing.query_selector('div[class*="entity-result__primary-subtitle"], span[class*="entity-result__subtitle"]')
+                if location_elem:
+                    company_data['company_address'] = await location_elem.inner_text()
+                    company_data['company_address'] = company_data['company_address'].strip()
+                
+                # Extract company size (if available)
+                size_elem = await listing.query_selector('div[class*="entity-result__secondary-subtitle"], span[class*="entity-result__insights"]')
+                if size_elem:
+                    size_text = await size_elem.inner_text()
+                    # Look for patterns like "11-50 employees"
+                    if 'employee' in size_text.lower():
+                        company_data['company_size'] = size_text.strip()
+                
+                # Extract website if present
+                website_elem = await listing.query_selector('a[href^="http"]:not([href*="linkedin"])')
+                if website_elem:
+                    website_href = await website_elem.get_attribute('href')
+                    if website_href and 'http' in website_href:
+                        company_data['website_url'] = normalize_url(website_href)
+                
+                if company_data.get('company_name'):
+                    companies.append(company_data)
+                    
+            except Exception as e:
+                Actor.log.debug(f"Error extracting LinkedIn listing data: {str(e)}")
+                continue
+        
+    except Exception as e:
+        Actor.log.error(f"Error searching LinkedIn: {str(e)}")
+    
+    Actor.log.info(f"LinkedIn search found {len(companies)} companies")
+    return companies
 
 
 async def search_companies(
@@ -212,9 +311,26 @@ async def search_companies(
                         total_found += 1
                         yield company
             except Exception as e:
-                Actor.log.error(f"Error in YellowPages search: {str(e)}")
+                Actor.log.error(f"Error in Google Maps search: {str(e)}")
             
-            # Add more directory sources here as needed
+            # Try LinkedIn for additional data
+            if total_found < max_results:
+                Actor.log.info("Trying LinkedIn...")
+                try:
+                    companies = await search_linkedin(industry, location, max_results - total_found, page)
+                    
+                    for company in companies:
+                        if total_found >= max_results:
+                            break
+                        
+                        # Deduplicate by company name
+                        company_name = company.get('company_name', '').lower().strip()
+                        if company_name and company_name not in seen_names:
+                            seen_names.add(company_name)
+                            total_found += 1
+                            yield company
+                except Exception as e:
+                    Actor.log.error(f"Error in LinkedIn search: {str(e)}")
             
         finally:
             await browser.close()
