@@ -10,6 +10,7 @@
   "input": {
     "title": "Lead Scraper Input",
     "type": "object",
+    "schemaVersion": 1,
     "properties": {
       "industry": {
         "type": "string",
