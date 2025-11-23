@@ -11,8 +11,8 @@ from src.utils import normalize_url
 
 
 # Directory search URLs and selectors
-# Using Google Maps as primary source (more reliable than YellowPages)
 GOOGLE_MAPS_SEARCH_URL = "https://www.google.com/maps/search"
+LINKEDIN_SEARCH_URL = "https://www.linkedin.com/search/results/companies"
 
 
 async def search_google_maps(
