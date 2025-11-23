@@ -43,31 +43,37 @@ async def search_google_maps(
         Actor.log.info(f"Navigating to Google Maps: {search_url}")
         
         # Navigate to the page with browser automation
-        await page.goto(search_url, wait_until='networkidle', timeout=30000)
+        # Use 'domcontentloaded' instead of 'networkidle' - faster and more reliable
+        await page.goto(search_url, wait_until='domcontentloaded', timeout=60000)
         
-        # Wait for listings to load
-        await page.wait_for_timeout(5000)
+        # Wait for listings to load - give more time
+        await page.wait_for_timeout(8000)
         
         # Check page title
         page_title = await page.title()
         Actor.log.info(f"Page title: {page_title}")
         
         # Google Maps uses a side panel with results
-        # Wait for the results panel to appear
+        # Wait for the results panel to appear - try multiple selectors
         try:
-            await page.wait_for_selector('div[role="article"], div[data-value], div[jsaction*="mouseover"]', timeout=10000)
+            # Try waiting for any of these selectors
+            await page.wait_for_selector('div[role="article"], div[data-value], div[jsaction*="mouseover"], div[class*="section-result"], div[class*="place-result"]', timeout=15000)
         except:
-            Actor.log.warning("Results panel did not appear")
+            Actor.log.warning("Results panel did not appear - will try to find listings anyway")
         
         # Try multiple selectors for Google Maps listings
         listings = []
         selectors = [
             'div[role="article"]',
+            'div[class*="section-result"]',
+            'div[class*="place-result"]',
             'div[data-value]',
             'div[jsaction*="mouseover"]',
             'a[data-value]',
             'div[class*="result"]',
-            'div[class*="place"]'
+            'div[class*="place"]',
+            'div[class*="Nv2PK"]',  # Common Google Maps class
+            'a[href*="/maps/place/"]'  # Direct place links
         ]
         
         for selector in selectors:
@@ -90,7 +96,7 @@ async def search_google_maps(
                 company_data = {}
                 
                 # Extract company name - Google Maps typically has it in a link or heading
-                name_elem = await listing.query_selector('a[data-value], div[data-value] a, h3, div[role="button"]')
+                name_elem = await listing.query_selector('a[data-value], div[data-value] a, h3, div[role="button"], div[class*="fontHeadlineSmall"], a[href*="/maps/place/"]')
                 if not name_elem:
                     # Try getting text directly
                     name_text = await listing.evaluate('el => el.innerText')
@@ -100,6 +106,13 @@ async def search_google_maps(
                 else:
                     company_data['company_name'] = await name_elem.inner_text()
                     company_data['company_name'] = company_data['company_name'].strip()
+                
+                # Also try to get name from href if it's a place link
+                if not company_data.get('company_name'):
+                    place_link = await listing.query_selector('a[href*="/maps/place/"]')
+                    if place_link:
+                        company_data['company_name'] = await place_link.inner_text()
+                        company_data['company_name'] = company_data['company_name'].strip()
                 
                 if not company_data.get('company_name'):
                     continue
