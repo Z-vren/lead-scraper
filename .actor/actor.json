@@ -12,7 +12,6 @@
     "type": "object",
     "schema": {
       "schemaVersion": 1,
-      "type": "object",
       "properties": {
         "industry": {
           "type": "string",
