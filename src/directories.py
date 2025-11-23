@@ -11,19 +11,18 @@ from src.utils import normalize_url
 
 
 # Directory search URLs and selectors
-# Using a generic approach that can work with multiple directories
-YELLOWPAGES_SEARCH_URL = "https://www.yellowpages.com/search"
-YELLOWPAGES_BASE_URL = "https://www.yellowpages.com"
+# Using Google Maps as primary source (more reliable than YellowPages)
+GOOGLE_MAPS_SEARCH_URL = "https://www.google.com/maps/search"
 
 
-async def search_yellowpages(
+async def search_google_maps(
     industry: str,
     location: str,
     max_results: int,
     page: Page
 ) -> List[Dict]:
     """
-    Search YellowPages for companies matching industry and location using browser automation.
+    Search Google Maps for companies matching industry and location using browser automation.
     
     Args:
         industry: Industry keyword
@@ -37,46 +36,44 @@ async def search_yellowpages(
     companies = []
     
     try:
-        # Build search URL
-        search_query = f"{industry} {location}"
-        search_url = f"{YELLOWPAGES_SEARCH_URL}?search_terms={quote_plus(search_query)}&geo_location_terms={quote_plus(location)}"
+        # Build search URL for Google Maps
+        search_query = f"{industry} in {location}"
+        search_url = f"{GOOGLE_MAPS_SEARCH_URL}/{quote_plus(search_query)}"
         
-        Actor.log.info(f"Navigating to YellowPages: {search_url}")
+        Actor.log.info(f"Navigating to Google Maps: {search_url}")
         
         # Navigate to the page with browser automation
         await page.goto(search_url, wait_until='networkidle', timeout=30000)
         
-        # Wait for listings to load - give more time for dynamic content
-        await page.wait_for_timeout(5000)  # Increased wait time
+        # Wait for listings to load
+        await page.wait_for_timeout(5000)
         
-        # Check if page loaded correctly (look for common YellowPages elements)
+        # Check page title
         page_title = await page.title()
         Actor.log.info(f"Page title: {page_title}")
         
-        # Check for CAPTCHA or error pages
-        page_content = await page.content()
-        if 'captcha' in page_content.lower() or 'robot' in page_content.lower():
-            Actor.log.warning("Possible CAPTCHA or bot detection on page")
+        # Google Maps uses a side panel with results
+        # Wait for the results panel to appear
+        try:
+            await page.wait_for_selector('div[role="article"], div[data-value], div[jsaction*="mouseover"]', timeout=10000)
+        except:
+            Actor.log.warning("Results panel did not appear")
         
-        # Try multiple selectors for listings
+        # Try multiple selectors for Google Maps listings
         listings = []
         selectors = [
+            'div[role="article"]',
+            'div[data-value]',
+            'div[jsaction*="mouseover"]',
+            'a[data-value]',
             'div[class*="result"]',
-            'div[class*="listing"]',
-            'div.srp-listing',
-            'div.search-result',
-            'div[data-dotcom="result"]',
-            'div.result',
-            'div[class*="organic"]',
-            'div[class*="business"]',
-            'article[class*="result"]',
-            'div[class*="search-listing"]'
+            'div[class*="place"]'
         ]
         
         for selector in selectors:
             try:
                 listings = await page.query_selector_all(selector)
-                if listings:
+                if listings and len(listings) > 0:
                     Actor.log.info(f"Found {len(listings)} listings with selector: {selector}")
                     break
             except Exception as e:
@@ -85,52 +82,47 @@ async def search_yellowpages(
         
         if not listings:
             Actor.log.warning("No listings found with any selector")
-            # Try to get a screenshot or HTML snippet for debugging
-            try:
-                # Check what's actually on the page
-                body_text = await page.evaluate('() => document.body.innerText')
-                Actor.log.debug(f"Page body text preview: {body_text[:500]}")
-            except:
-                pass
             return companies
         
-        # Extract data from listings
+        # Extract data from listings (limit to max_results)
         for listing in listings[:max_results]:
             try:
                 company_data = {}
                 
-                # Extract company name
-                name_elem = await listing.query_selector('a[class*="business-name"], a[class*="name"], h2 a, a[href]')
-                if name_elem:
+                # Extract company name - Google Maps typically has it in a link or heading
+                name_elem = await listing.query_selector('a[data-value], div[data-value] a, h3, div[role="button"]')
+                if not name_elem:
+                    # Try getting text directly
+                    name_text = await listing.evaluate('el => el.innerText')
+                    if name_text:
+                        # First line is usually the company name
+                        company_data['company_name'] = name_text.split('\n')[0].strip()
+                else:
                     company_data['company_name'] = await name_elem.inner_text()
                     company_data['company_name'] = company_data['company_name'].strip()
-                    
-                    # Try to get website URL
-                    href = await name_elem.get_attribute('href')
-                    if href:
-                        company_data['website_url'] = normalize_url(href, YELLOWPAGES_BASE_URL)
-                else:
+                
+                if not company_data.get('company_name'):
                     continue
                 
-                # Extract address
-                address_elem = await listing.query_selector('div[class*="address"], span[class*="address"]')
+                # Extract address - usually in the listing text
+                address_elem = await listing.query_selector('span[class*="address"], div[class*="address"]')
                 if address_elem:
                     company_data['company_address'] = await address_elem.inner_text()
                     company_data['company_address'] = company_data['company_address'].strip()
+                else:
+                    # Try to extract from full text
+                    full_text = await listing.evaluate('el => el.innerText')
+                    lines = full_text.split('\n')
+                    if len(lines) > 1:
+                        # Address is usually on second or third line
+                        company_data['company_address'] = lines[1].strip() if len(lines) > 1 else ''
                 
-                # Extract website URL (separate from company name link)
-                website_elem = await listing.query_selector('a[class*="website"], a[class*="url"]')
+                # Extract website URL if present
+                website_elem = await listing.query_selector('a[href*="http"]:not([href*="google"]):not([href*="maps"])')
                 if website_elem:
                     website_href = await website_elem.get_attribute('href')
-                    if website_href:
-                        company_data['website_url'] = normalize_url(website_href, YELLOWPAGES_BASE_URL)
-                
-                # Extract LinkedIn if present
-                linkedin_elem = await listing.query_selector('a[href*="linkedin.com"]')
-                if linkedin_elem:
-                    linkedin_href = await linkedin_elem.get_attribute('href')
-                    if linkedin_href:
-                        company_data['linkedin_url'] = normalize_url(linkedin_href)
+                    if website_href and 'http' in website_href:
+                        company_data['website_url'] = normalize_url(website_href)
                 
                 if company_data.get('company_name'):
                     companies.append(company_data)
@@ -140,10 +132,10 @@ async def search_yellowpages(
                 continue
         
     except Exception as e:
-        Actor.log.error(f"Error searching YellowPages: {str(e)}")
+        Actor.log.error(f"Error searching Google Maps: {str(e)}")
         Actor.log.debug(f"Search URL was: {search_url}")
     
-    Actor.log.info(f"YellowPages search found {len(companies)} companies")
+    Actor.log.info(f"Google Maps search found {len(companies)} companies")
     return companies
 
 
@@ -204,10 +196,10 @@ async def search_companies(
             seen_names = set()
             total_found = 0
             
-            # Try YellowPages
-            Actor.log.info("Trying YellowPages...")
+            # Try Google Maps
+            Actor.log.info("Trying Google Maps...")
             try:
-                companies = await search_yellowpages(industry, location, max_results, page)
+                companies = await search_google_maps(industry, location, max_results, page)
                 
                 for company in companies:
                     if total_found >= max_results:
