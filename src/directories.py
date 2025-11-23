@@ -3,10 +3,9 @@
 
 import asyncio
 from typing import List, Dict, Optional, AsyncIterator
-import httpx
-from bs4 import BeautifulSoup
 from urllib.parse import quote_plus, urljoin
 from apify import Actor
+from playwright.async_api import async_playwright, Browser, Page
 
 from src.utils import normalize_url
 
@@ -21,16 +20,16 @@ async def search_yellowpages(
     industry: str,
     location: str,
     max_results: int,
-    client: httpx.AsyncClient
+    page: Page
 ) -> List[Dict]:
     """
-    Search YellowPages for companies matching industry and location.
+    Search YellowPages for companies matching industry and location using browser automation.
     
     Args:
         industry: Industry keyword
         location: Location string
         max_results: Maximum number of results
-        client: HTTP client
+        page: Playwright page object
         
     Returns:
         List of company dictionaries with basic info
@@ -42,77 +41,83 @@ async def search_yellowpages(
         search_query = f"{industry} {location}"
         search_url = f"{YELLOWPAGES_SEARCH_URL}?search_terms={quote_plus(search_query)}&geo_location_terms={quote_plus(location)}"
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-        }
+        Actor.log.info(f"Navigating to YellowPages: {search_url}")
         
-        response = await client.get(search_url, headers=headers, timeout=30.0, follow_redirects=True)
-        response.raise_for_status()
+        # Navigate to the page with browser automation
+        await page.goto(search_url, wait_until='networkidle', timeout=30000)
         
-        soup = BeautifulSoup(response.text, 'lxml')
+        # Wait for listings to load
+        await page.wait_for_timeout(2000)  # Give page time to render
         
-        # YellowPages structure - adjust selectors based on actual page structure
-        # Common selectors for business listings
-        listings = soup.find_all('div', class_=lambda x: x and ('result' in x.lower() or 'listing' in x.lower()))
+        # Try multiple selectors for listings
+        listings = []
+        selectors = [
+            'div[class*="result"]',
+            'div[class*="listing"]',
+            'div.srp-listing',
+            'div.search-result',
+            'div[data-dotcom="result"]'
+        ]
+        
+        for selector in selectors:
+            try:
+                listings = await page.query_selector_all(selector)
+                if listings:
+                    Actor.log.info(f"Found {len(listings)} listings with selector: {selector}")
+                    break
+            except:
+                continue
         
         if not listings:
-            # Try alternative selector
-            listings = soup.find_all('div', {'class': 'srp-listing'})
+            Actor.log.warning("No listings found with any selector")
+            return companies
         
-        if not listings:
-            # Try another common pattern
-            listings = soup.find_all('div', {'class': 'search-result'})
-        
+        # Extract data from listings
         for listing in listings[:max_results]:
             try:
                 company_data = {}
                 
                 # Extract company name
-                name_elem = listing.find('a', class_=lambda x: x and ('business-name' in x.lower() or 'name' in x.lower()))
-                if not name_elem:
-                    name_elem = listing.find('h2', class_=lambda x: x and 'name' in x.lower())
-                if not name_elem:
-                    name_elem = listing.find('a', href=True)
-                
+                name_elem = await listing.query_selector('a[class*="business-name"], a[class*="name"], h2 a, a[href]')
                 if name_elem:
-                    company_data['company_name'] = name_elem.get_text(strip=True)
+                    company_data['company_name'] = await name_elem.inner_text()
+                    company_data['company_name'] = company_data['company_name'].strip()
                     
-                    # Try to get website from the same link or nearby
-                    href = name_elem.get('href', '')
+                    # Try to get website URL
+                    href = await name_elem.get_attribute('href')
                     if href:
                         company_data['website_url'] = normalize_url(href, YELLOWPAGES_BASE_URL)
                 else:
                     continue
                 
                 # Extract address
-                address_elem = listing.find('div', class_=lambda x: x and 'address' in x.lower())
-                if not address_elem:
-                    address_elem = listing.find('span', class_=lambda x: x and 'address' in x.lower())
-                
+                address_elem = await listing.query_selector('div[class*="address"], span[class*="address"]')
                 if address_elem:
-                    company_data['company_address'] = address_elem.get_text(strip=True)
+                    company_data['company_address'] = await address_elem.inner_text()
+                    company_data['company_address'] = company_data['company_address'].strip()
                 
                 # Extract website URL (separate from company name link)
-                website_elem = listing.find('a', class_=lambda x: x and ('website' in x.lower() or 'url' in x.lower()))
-                if website_elem and website_elem.get('href'):
-                    company_data['website_url'] = normalize_url(website_elem['href'], YELLOWPAGES_BASE_URL)
+                website_elem = await listing.query_selector('a[class*="website"], a[class*="url"]')
+                if website_elem:
+                    website_href = await website_elem.get_attribute('href')
+                    if website_href:
+                        company_data['website_url'] = normalize_url(website_href, YELLOWPAGES_BASE_URL)
                 
                 # Extract LinkedIn if present
-                linkedin_elem = listing.find('a', href=lambda x: x and 'linkedin.com' in x.lower() if x else False)
+                linkedin_elem = await listing.query_selector('a[href*="linkedin.com"]')
                 if linkedin_elem:
-                    company_data['linkedin_url'] = normalize_url(linkedin_elem.get('href', ''))
+                    linkedin_href = await linkedin_elem.get_attribute('href')
+                    if linkedin_href:
+                        company_data['linkedin_url'] = normalize_url(linkedin_href)
                 
                 if company_data.get('company_name'):
                     companies.append(company_data)
                     
             except Exception as e:
-                # Skip individual listing errors
+                Actor.log.debug(f"Error extracting listing data: {str(e)}")
                 continue
         
     except Exception as e:
-        # Log error but continue
         Actor.log.error(f"Error searching YellowPages: {str(e)}")
         Actor.log.debug(f"Search URL was: {search_url}")
     
@@ -161,24 +166,26 @@ async def search_companies(
     Yields:
         Company dictionaries with basic information
     """
-    async with httpx.AsyncClient() as client:
-        # Try multiple directory sources
-        Actor.log.info(f"Searching directories for: {industry} in {location}")
-        sources = [
-            search_yellowpages(industry, location, max_results, client),
-            # Add more directory sources here as needed
-        ]
+    async with async_playwright() as p:
+        # Launch browser with stealth settings
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport={'width': 1920, 'height': 1080}
+        )
+        page = await context.new_page()
         
-        seen_names = set()
-        total_found = 0
-        
-        for source_coro in sources:
-            Actor.log.info(f"Trying search source...")
-            if total_found >= max_results:
-                break
-                
+        try:
+            # Try multiple directory sources
+            Actor.log.info(f"Searching directories for: {industry} in {location}")
+            
+            seen_names = set()
+            total_found = 0
+            
+            # Try YellowPages
+            Actor.log.info("Trying YellowPages...")
             try:
-                companies = await source_coro
+                companies = await search_yellowpages(industry, location, max_results, page)
                 
                 for company in companies:
                     if total_found >= max_results:
@@ -190,9 +197,11 @@ async def search_companies(
                         seen_names.add(company_name)
                         total_found += 1
                         yield company
-                        
             except Exception as e:
-                # Continue with next source if one fails
-                Actor.log.error(f"Error in search source: {str(e)}")
-                continue
+                Actor.log.error(f"Error in YellowPages search: {str(e)}")
+            
+            # Add more directory sources here as needed
+            
+        finally:
+            await browser.close()
 
