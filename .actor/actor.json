@@ -7,9 +7,6 @@
   "defaultRunTimeoutSecs": 3600,
   "dockerfileFile": "Dockerfile",
   "readme": "README.md",
-  "storages": {
-    "dataset": "./storage/datasets/default"
-  },
   "input": {
     "title": "Lead Scraper Input",
     "type": "object",
